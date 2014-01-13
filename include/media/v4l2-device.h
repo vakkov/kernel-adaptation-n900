@@ -21,6 +21,7 @@
 #ifndef _V4L2_DEVICE_H
 #define _V4L2_DEVICE_H
 
+#include <media/media-device.h>
 #include <media/v4l2-subdev.h>
 
 /* Each instance of a V4L2 device should create the v4l2_device struct,
@@ -39,6 +40,9 @@ struct v4l2_device {
 	   Note: dev might be NULL if there is no parent device
 	   as is the case with e.g. ISA devices. */
 	struct device *dev;
+#if defined(CONFIG_MEDIA_CONTROLLER)
+	struct media_device *mdev;
+#endif
 	/* used to keep track of the registered subdevs */
 	struct list_head subdevs;
 	/* lock this struct; can be used by the driver as well if this
@@ -95,6 +99,12 @@ int __must_check v4l2_device_register_subdev(struct v4l2_device *v4l2_dev,
 /* Unregister a subdev with a v4l2 device. Can also be called if the subdev
    wasn't registered. In that case it will do nothing. */
 void v4l2_device_unregister_subdev(struct v4l2_subdev *sd);
+
+/* Register device nodes for all subdev of the v4l2 device that are marked with
+ * the V4L2_SUBDEV_FL_HAS_DEVNODE flag.
+ */
+int __must_check
+v4l2_device_register_subdev_nodes(struct v4l2_device *v4l2_dev);
 
 /* Iterate over all subdevs. */
 #define v4l2_device_for_each_subdev(sd, v4l2_dev)			\

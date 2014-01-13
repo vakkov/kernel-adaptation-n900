@@ -567,11 +567,16 @@ static irqreturn_t musb_stage0_irq(struct musb *musb, u8 int_usb,
 		 *  - ... to A_WAIT_BCON.
 		 * a_wait_vrise_tmout triggers VBUS_ERROR transitions
 		 */
-		musb_writeb(mbase, MUSB_DEVCTL, MUSB_DEVCTL_SESSION);
-		musb->ep0_stage = MUSB_EP0_START;
-		musb->xceiv->state = OTG_STATE_A_IDLE;
-		MUSB_HST_MODE(musb);
-		musb_set_vbus(musb, 1);
+		if ((devctl & MUSB_DEVCTL_VBUS)
+				&& !(devctl & MUSB_DEVCTL_BDEVICE)) {
+			musb_writeb(mbase, MUSB_DEVCTL, MUSB_DEVCTL_SESSION);
+			musb->ep0_stage = MUSB_EP0_START;
+			musb->xceiv->state = OTG_STATE_A_IDLE;
+			MUSB_HST_MODE(musb);
+			musb_set_vbus(musb, 1);
+		} else {
+			DBG(5, "discarding SESSREQ INT\n");
+		}
 
 		handled = IRQ_HANDLED;
 	}
@@ -1801,7 +1806,37 @@ musb_vbus_show(struct device *dev, struct device_attribute *attr, char *buf)
 }
 static DEVICE_ATTR(vbus, 0644, musb_vbus_show, musb_vbus_store);
 
+static ssize_t
+musb_ma_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct musb	*musb = dev_to_musb(dev);
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", musb->power_draw);
+}
+static DEVICE_ATTR(mA, 0444, musb_ma_show, NULL);
+
+static ssize_t
+musb_charger_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct musb	*musb = dev_to_musb(dev);
+	int		charger;
+
+	charger = otg_detect_charger(musb->xceiv);
+
+	return snprintf(buf, PAGE_SIZE, "%d\n", charger);
+}
+static DEVICE_ATTR(charger, 0444, musb_charger_show, NULL);
+
 #ifdef CONFIG_USB_GADGET_MUSB_HDRC
+
+static ssize_t
+musb_suspend_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct musb *musb = dev_to_musb(dev);
+
+	return sprintf(buf, "%d\n", musb->is_suspended);
+}
+static DEVICE_ATTR(suspend, 0444, musb_suspend_show, NULL);
 
 /* Gadget drivers can't know that a host is connected so they might want
  * to start SRP, but users can.  This allows userspace to trigger SRP.
@@ -1831,7 +1866,10 @@ static DEVICE_ATTR(srp, 0644, NULL, musb_srp_store);
 static struct attribute *musb_attributes[] = {
 	&dev_attr_mode.attr,
 	&dev_attr_vbus.attr,
+	&dev_attr_mA.attr,
+	&dev_attr_charger.attr,
 #ifdef CONFIG_USB_GADGET_MUSB_HDRC
+	&dev_attr_suspend.attr,
 	&dev_attr_srp.attr,
 #endif
 	NULL
@@ -1847,12 +1885,24 @@ static const struct attribute_group musb_attr_group = {
 static void musb_irq_work(struct work_struct *data)
 {
 	struct musb *musb = container_of(data, struct musb, irq_work);
-	static int old_state;
+	static int old_state, old_suspend;
+	static int old_power_draw;
 
 	if (musb->xceiv->state != old_state) {
 		old_state = musb->xceiv->state;
 		sysfs_notify(&musb->controller->kobj, NULL, "mode");
 	}
+
+	if (musb->power_draw != old_power_draw) {
+		old_power_draw = musb->power_draw;
+		sysfs_notify(&musb->controller->kobj, NULL, "mA");
+	}
+#ifdef CONFIG_USB_GADGET_MUSB_HDRC
+	if (old_suspend != musb->is_suspended) {
+		old_suspend = musb->is_suspended;
+		sysfs_notify(&musb->controller->kobj, NULL, "suspend");
+	}
+#endif
 }
 
 /* --------------------------------------------------------------------------

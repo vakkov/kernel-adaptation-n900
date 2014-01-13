@@ -198,6 +198,8 @@ void default_get_overlay_fifo_thresholds(enum omap_plane plane,
 int dss_init_overlay_managers(struct platform_device *pdev);
 void dss_uninit_overlay_managers(struct platform_device *pdev);
 int dss_mgr_wait_for_go_ovl(struct omap_overlay *ovl);
+int dss_mgr_notify_ovl(struct omap_overlay *ovl,
+		enum omap_dss_notify_event events);
 void dss_setup_partial_planes(struct omap_dss_device *dssdev,
 				u16 *x, u16 *y, u16 *w, u16 *h,
 				bool enlarge_update_area);
@@ -244,11 +246,11 @@ int dss_calc_clock_div(bool is_tft, unsigned long req_pck,
 
 /* SDI */
 #ifdef CONFIG_OMAP2_DSS_SDI
-int sdi_init(bool skip_init);
+int sdi_init(struct omap_dss_board_info *pdata, bool skip_init);
 void sdi_exit(void);
 int sdi_init_display(struct omap_dss_device *display);
 #else
-static inline int sdi_init(bool skip_init)
+static inline int sdi_init(struct omap_dss_board_info *pdata, bool skip_init)
 {
 	return 0;
 }

@@ -1588,8 +1588,16 @@ static int musb_gadget_vbus_draw(struct usb_gadget *gadget, unsigned mA)
 {
 	struct musb	*musb = gadget_to_musb(gadget);
 
+	if (musb->power_draw != mA && mA > 0) {
+		musb->power_draw = mA;
+		otg_notify_event(musb->xceiv, USB_EVENT_ENUMERATED,
+				&musb->power_draw);
+	}
+	schedule_work(&musb->irq_work);
+
 	if (!musb->xceiv->set_power)
 		return -EOPNOTSUPP;
+
 	return otg_set_power(musb->xceiv, mA);
 }
 

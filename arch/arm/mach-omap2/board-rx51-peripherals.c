@@ -15,6 +15,7 @@
 #include <linux/input/matrix_keypad.h>
 #include <linux/spi/spi.h>
 #include <linux/wl12xx.h>
+#include <linux/spi/tsc2005.h>
 #include <linux/i2c.h>
 #include <linux/i2c/twl.h>
 #include <linux/clk.h>
@@ -24,6 +25,13 @@
 #include <linux/gpio_keys.h>
 #include <linux/mmc/host.h>
 #include <sound/tlv320aic3x.h>
+#include <linux/bluetooth/hci_h4p.h>
+#include <media/radio-si4713.h>
+#include <media/si4713.h>
+#include <linux/hsi/hsi.h>
+#include <linux/cmt.h>
+#include <linux/irq.h>
+#include <linux/power/isp1704_charger.h>
 
 #include <plat/mcspi.h>
 #include <plat/board.h>
@@ -32,13 +40,17 @@
 #include <plat/gpmc.h>
 #include <plat/onenand.h>
 #include <plat/gpmc-smc91x.h>
+#include <plat/serial.h>
+#include <plat/ssi.h>
 
 #include <mach/board-rx51.h>
 
 #include <sound/tlv320aic3x.h>
 #include <sound/tpa6130a2-plat.h>
+#include <linux/leds-lp5523.h>
 
 #include <../drivers/staging/iio/light/tsl2563.h>
+#include <linux/lis3lv02d.h>
 
 #include "mux.h"
 #include "hsmmc.h"
@@ -48,6 +60,22 @@
 
 #define RX51_WL1251_POWER_GPIO		87
 #define RX51_WL1251_IRQ_GPIO		42
+#define RX51_FMTX_RESET_GPIO		163
+#define RX51_FMTX_IRQ			53
+
+#define RX51_TSC2005_RESET_GPIO		104
+#define RX51_TSC2005_IRQ_GPIO		100
+
+#define RX51_HCI_H4P_RESET_GPIO		91
+#define RX51_HCI_H4P_HOSTWU_GPIO	101
+#define RX51_HCI_H4P_BTWU_GPIO		37
+
+#define LIS302_IRQ1_GPIO 181
+#define LIS302_IRQ2_GPIO 180  /* Not yet in use */
+
+#define RX51_LP5523_CHIP_EN_GPIO        41
+
+#define RX51_USB_TRANSCEIVER_RST_GPIO	67
 
 /* list all spi devices here */
 enum {
@@ -57,10 +85,155 @@ enum {
 };
 
 static struct wl12xx_platform_data wl1251_pdata;
+static struct tsc2005_platform_data tsc2005_pdata;
+
+#if defined(CONFIG_SENSORS_LIS3_I2C) || defined(CONFIG_SENSORS_LIS3_I2C_MODULE)
+static int lis302_setup(void)
+{
+	int err;
+	int irq1 = LIS302_IRQ1_GPIO;
+	int irq2 = LIS302_IRQ2_GPIO;
+
+	/* gpio for interrupt pin 1 */
+	err = gpio_request(irq1, "lis3lv02dl_irq1");
+	if (err) {
+		printk(KERN_ERR "lis3lv02dl: gpio request failed\n");
+		goto out;
+	}
+
+	/* gpio for interrupt pin 2 */
+	err = gpio_request(irq2, "lis3lv02dl_irq2");
+	if (err) {
+		gpio_free(irq1);
+		printk(KERN_ERR "lis3lv02dl: gpio request failed\n");
+		goto out;
+	}
+
+	gpio_direction_input(irq1);
+	gpio_direction_input(irq2);
+
+out:
+	return err;
+}
+
+static int lis302_release(void)
+{
+	gpio_free(LIS302_IRQ1_GPIO);
+	gpio_free(LIS302_IRQ2_GPIO);
+
+        return 0;
+}
+
+static struct lis3lv02d_platform_data rx51_lis3lv02d_data = {
+	.click_flags    = LIS3_CLICK_SINGLE_X | LIS3_CLICK_SINGLE_Y |
+			  LIS3_CLICK_SINGLE_Z,
+	/* Limits are 0.5g * value */
+	.click_thresh_x = 8,
+	.click_thresh_y = 8,
+	.click_thresh_z = 10,
+	/* Click must be longer than time limit */
+	.click_time_limit = 9,
+	/* Kind of debounce filter */
+	.click_latency    = 50,
+
+	/* Limits for all axis. millig-value / 18 to get HW values */
+	.wakeup_flags = LIS3_WAKEUP_X_HI | LIS3_WAKEUP_Y_HI,
+	.wakeup_thresh = 800 / 18,
+	.wakeup_flags2 = LIS3_WAKEUP_Z_HI ,
+	.wakeup_thresh2 = 900 / 18,
+
+	.hipass_ctrl = LIS3_HIPASS1_DISABLE | LIS3_HIPASS2_DISABLE,
+
+	/* Interrupt line 2 for click detection, line 1 for thresholds */
+	.irq_cfg = LIS3_IRQ2_CLICK | LIS3_IRQ1_FF_WU_12,
+
+	.axis_x = LIS3_DEV_X,
+	.axis_y = LIS3_INV_DEV_Y,
+	.axis_z = LIS3_INV_DEV_Z,
+	.setup_resources = lis302_setup,
+	.release_resources = lis302_release,
+	.st_min_limits = {-32, 3, 3},
+	.st_max_limits = {-3, 32, 32},
+	.irq2 = OMAP_GPIO_IRQ(LIS302_IRQ2_GPIO),
+};
+#endif
 
 #if defined(CONFIG_SENSORS_TSL2563) || defined(CONFIG_SENSORS_TSL2563_MODULE)
 static struct tsl2563_platform_data rx51_tsl2563_platform_data = {
 	.cover_comp_gain = 16,
+};
+#endif
+
+#if defined(CONFIG_LEDS_LP5523) || defined(CONFIG_LEDS_LP5523_MODULE)
+static struct lp5523_led_config rx51_lp5523_led_config[] = {
+	{
+		.chan_nr	= 0,
+		.led_current	= 50,
+	}, {
+		.chan_nr	= 1,
+		.led_current	= 50,
+	}, {
+		.chan_nr	= 2,
+		.led_current	= 50,
+	}, {
+		.chan_nr	= 3,
+		.led_current	= 50,
+	}, {
+		.chan_nr	= 4,
+		.led_current	= 50,
+	}, {
+		.chan_nr	= 5,
+		.led_current	= 50,
+	}, {
+		.chan_nr	= 6,
+		.led_current	= 50,
+	}, {
+		.chan_nr	= 7,
+		.led_current	= 50,
+	}, {
+		.chan_nr	= 8,
+		.led_current	= 50,
+	}
+};
+
+static int rx51_lp5523_setup(void)
+{
+	int err;
+
+	err = gpio_request(RX51_LP5523_CHIP_EN_GPIO, "lp5523_enable");
+	if (err < 0) {
+		pr_err("Unable to get lp5523_enable GPIO\n");
+		return err;
+	}
+
+	err = gpio_direction_output(RX51_LP5523_CHIP_EN_GPIO, 1);
+	if (err < 0) {
+		pr_err("Failed to change direction for %d GPIO\n",
+				RX51_LP5523_CHIP_EN_GPIO);
+	}
+	return err;
+}
+
+static void rx51_lp5523_release(void)
+{
+	gpio_free(RX51_LP5523_CHIP_EN_GPIO);
+}
+
+static void rx51_lp5523_enable(bool state)
+{
+	if (state)
+		gpio_set_value(RX51_LP5523_CHIP_EN_GPIO, 1);
+	else
+		gpio_set_value(RX51_LP5523_CHIP_EN_GPIO, 0);
+}
+
+static struct lp5523_platform_data rx51_lp5523_platform_data = {
+	.led_config		= rx51_lp5523_led_config,
+	.num_channels		= ARRAY_SIZE(rx51_lp5523_led_config),
+	.clock_mode		= LP5523_CLOCK_AUTO,
+	.setup_resources	= rx51_lp5523_setup,
+	.release_resources 	= rx51_lp5523_release,
+	.enable			= rx51_lp5523_enable,
 };
 #endif
 
@@ -100,16 +273,36 @@ static struct spi_board_info rx51_peripherals_spi_board_info[] __initdata = {
 		.modalias		= "tsc2005",
 		.bus_num		= 1,
 		.chip_select		= 0,
-		/* .irq = OMAP_GPIO_IRQ(RX51_TSC2005_IRQ_GPIO),*/
+		.irq			= OMAP_GPIO_IRQ(RX51_TSC2005_IRQ_GPIO),
 		.max_speed_hz		= 6000000,
 		.controller_data	= &tsc2005_mcspi_config,
-		/* .platform_data = &tsc2005_config,*/
+		.platform_data		= &tsc2005_pdata,
 	},
 };
 
-static struct platform_device rx51_charger_device = {
-	.name = "isp1704_charger",
+static void rx51_charger_set_power(bool on)
+{
+	gpio_set_value(RX51_USB_TRANSCEIVER_RST_GPIO, on);
+}
+
+static struct isp1704_charger_data rx51_charger_data = {
+	.set_power	= rx51_charger_set_power,
 };
+
+static struct platform_device rx51_charger_device = {
+	.name	= "isp1704_charger",
+	.dev	= {
+		.platform_data = &rx51_charger_data,
+	},
+};
+
+static void __init rx51_charger_init(void)
+{
+	WARN_ON(gpio_request_one(RX51_USB_TRANSCEIVER_RST_GPIO,
+		GPIOF_OUT_INIT_LOW, "isp1704_reset"));
+
+	platform_device_register(&rx51_charger_device);
+}
 
 #if defined(CONFIG_KEYBOARD_GPIO) || defined(CONFIG_KEYBOARD_GPIO_MODULE)
 
@@ -156,7 +349,7 @@ static struct gpio_keys_button rx51_gpio_keys[] = {
 		.type			= EV_SW,
 		.code			= SW_KEYPAD_SLIDE,
 		.gpio			= RX51_GPIO_KEYPAD_SLIDE,
-		.active_low		= 1,
+		.active_low		= 0,
 		.debounce_interval	= RX51_GPIO_DEBOUNCE_TIMEOUT,
 	}, {
 		.desc			= "Proximity Sensor",
@@ -332,6 +525,13 @@ static struct omap2_hsmmc_info mmc[] __initdata = {
 static struct regulator_consumer_supply rx51_vmmc1_supply =
 	REGULATOR_SUPPLY("vmmc", "mmci-omap-hs.0");
 
+static struct regulator_consumer_supply rx51_vaux2_supplies[] = {
+	REGULATOR_SUPPLY("vdds_csib", "omap3isp"),
+	{
+		.supply = "vaux2",
+	},
+};
+
 static struct regulator_consumer_supply rx51_vaux3_supply =
 	REGULATOR_SUPPLY("vmmc", "mmci-omap-hs.1");
 
@@ -352,6 +552,8 @@ static struct regulator_consumer_supply rx51_vio_supplies[] = {
 	/* tlv320aic3x digital supplies */
 	REGULATOR_SUPPLY("IOVDD", "2-0018"),
 	REGULATOR_SUPPLY("DVDD", "2-0018"),
+	/* Si4713 IO supply */
+	REGULATOR_SUPPLY("vio", "radio-si4713"),
 };
 
 #if defined(CONFIG_FB_OMAP2) || defined(CONFIG_FB_OMAP2_MODULE)
@@ -365,7 +567,19 @@ static struct regulator_consumer_supply rx51_vaux1_consumers[] = {
 		.dev	= &rx51_display_device.dev,
 	},
 #endif
+	/* Si4713 supply */
+	REGULATOR_SUPPLY("vdd", "2-0063"),
 };
+
+
+#if defined(CONFIG_FB_OMAP2) || defined(CONFIG_FB_OMAP2_MODULE)
+static struct regulator_consumer_supply rx51_vdac_supply[] = {
+	{
+		.supply	= "vdda_dac",
+		.dev	= &rx51_display_device.dev,
+	},
+};
+#endif
 
 static struct regulator_init_data rx51_vaux1 = {
 	.constraints = {
@@ -392,6 +606,8 @@ static struct regulator_init_data rx51_vaux2 = {
 		.valid_ops_mask		= REGULATOR_CHANGE_MODE
 					| REGULATOR_CHANGE_STATUS,
 	},
+	.num_consumer_supplies	= ARRAY_SIZE(rx51_vaux2_supplies),
+	.consumer_supplies	= rx51_vaux2_supplies,
 };
 
 /* VAUX3 - adds more power to VIO_18 rail */
@@ -424,6 +640,15 @@ static struct regulator_init_data rx51_vaux3_mmc = {
 	.consumer_supplies	= &rx51_vaux3_supply,
 };
 
+static struct regulator_consumer_supply rx51_vaux4_consumers[] = {
+	REGULATOR_SUPPLY("VANA", "3-003e"),	/* Main camera sensor */
+	REGULATOR_SUPPLY("VANA", "3-000c"),	/* Main camera lens */
+	REGULATOR_SUPPLY("VANA", "2-0010"),	/* Secondary camera sensor */
+	{
+		.supply		= "vaux4",
+	},
+};
+
 static struct regulator_init_data rx51_vaux4 = {
 	.constraints = {
 		.name			= "VCAM_ANA_28",
@@ -435,6 +660,8 @@ static struct regulator_init_data rx51_vaux4 = {
 		.valid_ops_mask		= REGULATOR_CHANGE_MODE
 					| REGULATOR_CHANGE_STATUS,
 	},
+	.num_consumer_supplies	= ARRAY_SIZE(rx51_vaux4_consumers),
+	.consumer_supplies	= rx51_vaux4_consumers,
 };
 
 static struct regulator_init_data rx51_vmmc1 = {
@@ -456,6 +683,7 @@ static struct regulator_init_data rx51_vmmc2 = {
 		.name			= "V28_A",
 		.min_uV			= 2800000,
 		.max_uV			= 3000000,
+		.always_on		= true, /* due VIO leak to AIC34 VDDs */
 		.apply_uV		= true,
 		.valid_modes_mask	= REGULATOR_MODE_NORMAL
 					| REGULATOR_MODE_STANDBY,
@@ -465,6 +693,32 @@ static struct regulator_init_data rx51_vmmc2 = {
 	},
 	.num_consumer_supplies	= ARRAY_SIZE(rx51_vmmc2_supplies),
 	.consumer_supplies	= rx51_vmmc2_supplies,
+};
+
+static struct regulator_init_data rx51_vpll1 = {
+	.constraints = {
+		.name			= "VPLL",
+		.min_uV			= 1800000,
+		.max_uV			= 1800000,
+		.apply_uV		= true,
+		.always_on		= true,
+		.valid_modes_mask	= REGULATOR_MODE_NORMAL
+					| REGULATOR_MODE_STANDBY,
+		.valid_ops_mask		= REGULATOR_CHANGE_MODE,
+	},
+};
+
+static struct regulator_init_data rx51_vpll2 = {
+	.constraints = {
+		.name			= "VSDI_CSI",
+		.min_uV			= 1800000,
+		.max_uV			= 1800000,
+		.apply_uV		= true,
+		.always_on		= true,
+		.valid_modes_mask	= REGULATOR_MODE_NORMAL
+					| REGULATOR_MODE_STANDBY,
+		.valid_ops_mask		= REGULATOR_CHANGE_MODE,
+	},
 };
 
 static struct regulator_init_data rx51_vsim = {
@@ -484,14 +738,19 @@ static struct regulator_init_data rx51_vsim = {
 
 static struct regulator_init_data rx51_vdac = {
 	.constraints = {
+		.name			= "VDAC",
 		.min_uV			= 1800000,
 		.max_uV			= 1800000,
+		.apply_uV		= true,
 		.valid_modes_mask	= REGULATOR_MODE_NORMAL
 					| REGULATOR_MODE_STANDBY,
-		.valid_ops_mask		= REGULATOR_CHANGE_VOLTAGE
-					| REGULATOR_CHANGE_MODE
+		.valid_ops_mask		= REGULATOR_CHANGE_MODE
 					| REGULATOR_CHANGE_STATUS,
 	},
+#if defined(CONFIG_FB_OMAP2) || defined(CONFIG_FB_OMAP2_MODULE)
+	.num_consumer_supplies	= 1,
+	.consumer_supplies	= rx51_vdac_supply,
+#endif
 };
 
 static struct regulator_init_data rx51_vio = {
@@ -508,13 +767,86 @@ static struct regulator_init_data rx51_vio = {
 	.consumer_supplies	= rx51_vio_supplies,
 };
 
+static struct regulator_init_data rx51_vintana1 = {
+	.constraints = {
+		.name			= "VINTANA1",
+		.min_uV			= 1500000,
+		.max_uV			= 1500000,
+		.always_on		= true,
+		.valid_modes_mask	= REGULATOR_MODE_NORMAL
+					| REGULATOR_MODE_STANDBY,
+		.valid_ops_mask		= REGULATOR_CHANGE_MODE,
+	},
+};
+
+static struct regulator_init_data rx51_vintana2 = {
+	.constraints = {
+		.name			= "VINTANA2",
+		.min_uV			= 2750000,
+		.max_uV			= 2750000,
+		.apply_uV		= true,
+		.always_on		= true,
+		.valid_modes_mask	= REGULATOR_MODE_NORMAL
+					| REGULATOR_MODE_STANDBY,
+		.valid_ops_mask		= REGULATOR_CHANGE_MODE,
+	},
+};
+
+static struct regulator_init_data rx51_vintdig = {
+	.constraints = {
+		.name			= "VINTDIG",
+		.min_uV			= 1500000,
+		.max_uV			= 1500000,
+		.always_on		= true,
+		.valid_modes_mask	= REGULATOR_MODE_NORMAL
+					| REGULATOR_MODE_STANDBY,
+		.valid_ops_mask		= REGULATOR_CHANGE_MODE,
+	},
+};
+
+static struct si4713_platform_data rx51_si4713_i2c_data = {
+	.gpio_reset	= RX51_FMTX_RESET_GPIO,
+};
+
+static struct i2c_board_info rx51_si4713_board_info = {
+	I2C_BOARD_INFO("si4713", SI4713_I2C_ADDR_BUSEN_HIGH),
+	.platform_data	= &rx51_si4713_i2c_data,
+};
+
+static struct radio_si4713_platform_data rx51_si4713_data = {
+	.i2c_bus	= 2,
+	.subdev_board_info = &rx51_si4713_board_info,
+};
+
+static struct platform_device rx51_si4713_dev = {
+	.name	= "radio-si4713",
+	.id	= -1,
+	.dev	= {
+		.platform_data	= &rx51_si4713_data,
+	},
+};
+
+static __init void rx51_init_si4713(void)
+{
+	int err;
+
+	err = gpio_request(RX51_FMTX_IRQ, "si4713");
+	if (err) {
+		printk(KERN_ERR "Cannot request gpio %d\n", RX51_FMTX_IRQ);
+		return;
+	}
+	gpio_direction_input(RX51_FMTX_IRQ);
+	rx51_si4713_board_info.irq = gpio_to_irq(RX51_FMTX_IRQ);
+	platform_device_register(&rx51_si4713_dev);
+}
+
 static int rx51_twlgpio_setup(struct device *dev, unsigned gpio, unsigned n)
 {
 	/* FIXME this gpio setup is just a placeholder for now */
 	gpio_request(gpio + 6, "backlight_pwm");
 	gpio_direction_output(gpio + 6, 0);
 	gpio_request(gpio + 7, "speaker_en");
-	gpio_direction_output(gpio + 7, 1);
+	gpio_direction_output(gpio + 7, 0);
 
 	return 0;
 }
@@ -696,6 +1028,14 @@ static struct twl4030_power_data rx51_t2scripts_data __initdata = {
 	.resource_config = twl4030_rconfig,
 };
 
+struct twl4030_codec_vibra_data rx51_vibra_data __initdata = {
+	.coexist	= 0,
+};
+
+struct twl4030_codec_data rx51_codec_data __initdata = {
+	.audio_mclk	= 26000000,
+	.vibra		= &rx51_vibra_data,
+};
 
 static struct twl4030_platform_data rx51_twldata __initdata = {
 	.irq_base		= TWL4030_IRQ_BASE,
@@ -707,13 +1047,19 @@ static struct twl4030_platform_data rx51_twldata __initdata = {
 	.madc			= &rx51_madc_data,
 	.usb			= &rx51_usb_data,
 	.power			= &rx51_t2scripts_data,
+	.codec			= &rx51_codec_data,
 
 	.vaux1			= &rx51_vaux1,
 	.vaux2			= &rx51_vaux2,
 	.vaux4			= &rx51_vaux4,
 	.vmmc1			= &rx51_vmmc1,
+	.vpll1			= &rx51_vpll1,
+	.vpll2			= &rx51_vpll2,
 	.vsim			= &rx51_vsim,
 	.vdac			= &rx51_vdac,
+	.vintana1		= &rx51_vintana1,
+	.vintana2		= &rx51_vintana2,
+	.vintdig		= &rx51_vintdig,
 	.vio			= &rx51_vio,
 };
 
@@ -747,16 +1093,40 @@ static struct i2c_board_info __initdata rx51_peripherals_i2c_board_info_2[] = {
 		I2C_BOARD_INFO("tlv320aic3x", 0x18),
 		.platform_data = &rx51_aic3x_data,
 	},
+	{
+		I2C_BOARD_INFO("aic34b_dummy", 0x19),
+	},
 #if defined(CONFIG_SENSORS_TSL2563) || defined(CONFIG_SENSORS_TSL2563_MODULE)
 	{
 		I2C_BOARD_INFO("tsl2563", 0x29),
 		.platform_data = &rx51_tsl2563_platform_data,
 	},
 #endif
+#if defined(CONFIG_LEDS_LP5523) || defined(CONFIG_LEDS_LP5523_MODULE)
+	{
+		I2C_BOARD_INFO("lp5523", 0x32),
+		.platform_data  = &rx51_lp5523_platform_data,
+	},
+#endif
+#if defined(CONFIG_BATTERY_BQ27X00_I2C) || defined(CONFIG_BATTERY_BQ27X00_I2C_MODULE)
+	{
+		I2C_BOARD_INFO("bq27200", 0x55),
+	},
+#endif
 	{
 		I2C_BOARD_INFO("tpa6130a2", 0x60),
 		.platform_data = &rx51_tpa6130a2_data,
 	}
+};
+
+static struct i2c_board_info __initdata rx51_peripherals_i2c_board_info_3[] = {
+#if defined(CONFIG_SENSORS_LIS3_I2C) || defined(CONFIG_SENSORS_LIS3_I2C_MODULE)
+	{
+		I2C_BOARD_INFO("lis3lv02d", 0x1d),
+		.platform_data = &rx51_lis3lv02d_data,
+		.irq = OMAP_GPIO_IRQ(LIS302_IRQ1_GPIO),
+	},
+#endif
 };
 
 static int __init rx51_i2c_init(void)
@@ -774,7 +1144,8 @@ static int __init rx51_i2c_init(void)
 			      ARRAY_SIZE(rx51_peripherals_i2c_board_info_1));
 	omap_register_i2c_bus(2, 100, rx51_peripherals_i2c_board_info_2,
 			      ARRAY_SIZE(rx51_peripherals_i2c_board_info_2));
-	omap_register_i2c_bus(3, 400, NULL, 0);
+	omap_register_i2c_bus(3, 400, rx51_peripherals_i2c_board_info_3,
+			      ARRAY_SIZE(rx51_peripherals_i2c_board_info_3));
 	return 0;
 }
 
@@ -835,6 +1206,42 @@ static inline void board_onenand_init(void)
 }
 
 #endif
+
+static struct tsc2005_platform_data tsc2005_pdata = {
+	.ts_pressure_max   = 2048,
+	.ts_pressure_fudge = 2,
+	.ts_x_max	   = 4096,
+	.ts_x_fudge	   = 4,
+	.ts_y_max	   = 4096,
+	.ts_y_fudge	   = 4,
+	.ts_x_plate_ohm	   = 320,
+	.esd_timeout_ms	   = 8000,
+};
+
+static void rx51_tsc2005_set_reset(bool enable)
+{
+	gpio_set_value(RX51_TSC2005_RESET_GPIO, enable);
+}
+
+static void __init rx51_init_tsc2005(void)
+{
+	int r;
+
+	r = gpio_request(RX51_TSC2005_IRQ_GPIO, "tsc2005 IRQ");
+	if (r >= 0)
+		gpio_direction_input(RX51_TSC2005_IRQ_GPIO);
+	else
+		printk(KERN_ERR "unable to get %s GPIO\n", "tsc2005 IRQ");
+
+	r = gpio_request(RX51_TSC2005_RESET_GPIO, "tsc2005 reset");
+	if (r >= 0) {
+		gpio_direction_output(RX51_TSC2005_RESET_GPIO, 1);
+		tsc2005_pdata.set_reset = rx51_tsc2005_set_reset;
+	} else {
+		printk(KERN_ERR "unable to get %s GPIO\n", "tsc2005 reset");
+		tsc2005_pdata.esd_timeout_ms = 0;
+	}
+}
 
 #if defined(CONFIG_SMC91X) || defined(CONFIG_SMC91X_MODULE)
 
@@ -913,16 +1320,196 @@ error:
 	 */
 }
 
+static void rx51_hci_h4p_set_power(bool enable)
+{
+	gpio_set_value(RX51_HCI_H4P_RESET_GPIO, enable);
+}
+
+static void rx51_hci_h4p_set_bt_wu(bool enable)
+{
+	gpio_set_value(RX51_HCI_H4P_BTWU_GPIO, enable);
+}
+
+static bool rx51_hci_h4p_get_host_wu(void)
+{
+	return gpio_get_value(RX51_HCI_H4P_HOSTWU_GPIO);
+}
+
+struct hci_h4p_platform_data bt_plat_data = {
+	.uart_irq	= INT_24XX_UART2_IRQ,
+	.host_wu	= rx51_hci_h4p_get_host_wu,
+	.bt_wu		= rx51_hci_h4p_set_bt_wu,
+	.reset		= rx51_hci_h4p_set_power,
+	.host_wu_gpio	= RX51_HCI_H4P_HOSTWU_GPIO,
+};
+
+static struct platform_device rx51_bt_device = {
+	.name		= "hci_h4p",
+	.id		= -1,
+	.num_resources	= 0,
+	.dev = {
+		.platform_data = (void *)&bt_plat_data,
+	}
+};
+
+static ssize_t hci_h4p_store_bdaddr(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	struct hci_h4p_platform_data *bt_config =
+		rx51_bt_device.dev.platform_data;
+	unsigned int bdaddr[6];
+	int ret, i;
+
+	ret = sscanf(buf, "%2x:%2x:%2x:%2x:%2x:%2x\n",
+			&bdaddr[0], &bdaddr[1], &bdaddr[2],
+			&bdaddr[3], &bdaddr[4], &bdaddr[5]);
+
+	if (ret != 6)
+		return -EINVAL;
+
+	for (i = 0; i < 6; i++)
+		bt_config->bd_addr[i] = bdaddr[i] & 0xff;
+
+	return count;
+}
+
+static ssize_t hci_h4p_show_bdaddr(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	struct hci_h4p_platform_data *bt_config =
+		rx51_bt_device.dev.platform_data;
+
+	return sprintf(buf, "%.2x:%.2x:%.2x:%.2x:%.2x:%.2x\n",
+		       bt_config->bd_addr[0],
+		       bt_config->bd_addr[1],
+		       bt_config->bd_addr[2],
+		       bt_config->bd_addr[3],
+		       bt_config->bd_addr[4],
+		       bt_config->bd_addr[5]);
+}
+
+static DEVICE_ATTR(bdaddr, S_IRUGO | S_IWUSR, hci_h4p_show_bdaddr,
+		   hci_h4p_store_bdaddr);
+int hci_h4p_sysfs_create_files(struct device *dev)
+{
+	return device_create_file(dev, &dev_attr_bdaddr);
+}
+
+void __init rx51_bt_init(void)
+{
+	int err;
+
+	err = gpio_request(RX51_HCI_H4P_RESET_GPIO, "bt_reset");
+	if (err < 0)
+		return;
+
+	err = gpio_request(RX51_HCI_H4P_BTWU_GPIO, "bt_wakeup");
+	if (err < 0)
+		goto fail;
+
+	err = gpio_request(RX51_HCI_H4P_HOSTWU_GPIO, "host_wakeup");
+	if (err < 0)
+		goto fail2;
+
+	gpio_direction_output(RX51_HCI_H4P_RESET_GPIO, 0);
+	gpio_direction_output(RX51_HCI_H4P_BTWU_GPIO, 0);
+	gpio_direction_input(RX51_HCI_H4P_HOSTWU_GPIO);
+
+	bt_plat_data.uart_base = ioremap(OMAP3_UART2_BASE, SZ_2K);
+
+	err = platform_device_register(&rx51_bt_device);
+	if (!err) {
+		err = hci_h4p_sysfs_create_files(&rx51_bt_device.dev);
+		if(!err)
+			return;
+		platform_device_unregister(&rx51_bt_device);
+	}
+
+	gpio_free(RX51_HCI_H4P_HOSTWU_GPIO);
+fail2:
+	gpio_free(RX51_HCI_H4P_BTWU_GPIO);
+fail:
+	gpio_free(RX51_HCI_H4P_RESET_GPIO);
+	printk(KERN_ERR "Bluetooth device registration failed\n");
+}
+
+static struct cmt_platform_data rx51_cmt_pdata = {
+	.cmt_rst_ind_gpio = 72,
+	.cmt_rst_ind_flags = IRQF_TRIGGER_FALLING,
+};
+
+static struct platform_device rx51_cmt_device = {
+	.name = "cmt",
+	.id = -1,
+	.dev =  {
+		.platform_data = &rx51_cmt_pdata,
+	},
+};
+
+static void __init rx51_cmt_init(void)
+{
+	int err;
+
+	err = platform_device_register(&rx51_cmt_device);
+	if (err < 0)
+		pr_err("Could not register CMT device\n");
+}
+
+static struct omap_ssi_board_config __initdata rx51_ssi_config = {
+	.num_ports = 1,
+	.cawake_gpio = { 151 },
+};
+
+static struct hsi_board_info __initdata rx51_ssi_cl[] = {
+	[0] =	{
+ 		.name = "hsi_char",
+ 		.hsi_id = 0,
+ 		.port = 0,
+ 		},
+	[1] = 	{
+		.name = "ssi_protocol",
+		.hsi_id = 0,
+		.port = 0,
+		.tx_cfg = {
+			.mode = HSI_MODE_FRAME,
+			.channels = 4,
+			.speed = 55000,
+			.arb_mode = HSI_ARB_RR,
+			},
+		.rx_cfg = {
+			.mode = HSI_MODE_FRAME,
+			.channels = 4,
+			},
+		},
+	[2] =	{
+		.name = "cmt_speech",
+		.hsi_id = 0,
+		.port = 0,
+		},
+};
+
+static void __init rx51_ssi_init(void)
+{
+	omap_ssi_config(&rx51_ssi_config);
+	hsi_register_board_info(rx51_ssi_cl, ARRAY_SIZE(rx51_ssi_cl));
+}
+
 void __init rx51_peripherals_init(void)
 {
 	rx51_i2c_init();
+	regulator_has_full_constraints();
 	board_onenand_init();
 	board_smc91x_init();
 	rx51_add_gpio_keys();
 	rx51_init_wl1251();
+	rx51_init_tsc2005();
+	rx51_bt_init();
+	rx51_init_si4713();
+	rx51_cmt_init();
+	rx51_ssi_init();
 	spi_register_board_info(rx51_peripherals_spi_board_info,
 				ARRAY_SIZE(rx51_peripherals_spi_board_info));
 	omap2_hsmmc_init(mmc);
-	platform_device_register(&rx51_charger_device);
+	rx51_charger_init();
 }
-

@@ -899,6 +899,13 @@ static void mmc_power_up(struct mmc_host *host)
 {
 	int bit;
 
+	/*
+	 * According to p6.4.1.1 of Physical Layer Simplified Specification
+	 * Ver3.01 the "host needs to keep power line level less than 0.5V and
+	 * more than 1ms before power ramp up".
+	 */
+	mmc_delay(10);
+
 	/* If ocr is set, we use it */
 	if (host->ocr)
 		bit = ffs(host->ocr) - 1;
