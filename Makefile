@@ -1,7 +1,7 @@
 VERSION = 2
 PATCHLEVEL = 6
 SUBLEVEL = 37
-EXTRAVERSION =
+EXTRAVERSION = -7.31.Nemo.Adaptation.N900-n900
 NAME = Flesh-Eating Bats with Fangs
 
 # *DOCUMENTATION*
